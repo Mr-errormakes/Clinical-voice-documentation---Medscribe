@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from datetime import datetime
 import models
 from database import get_db
+from routers.auth import get_current_user
 
 router = APIRouter(prefix="/api/patients", tags=["Medications"])
 
@@ -56,7 +57,11 @@ class MedOut(BaseModel):
 
 
 @router.get("/{patient_id}/medications")
-def list_medications(patient_id: int, db: Session = Depends(get_db)):
+def list_medications(
+    patient_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
@@ -70,7 +75,12 @@ def list_medications(patient_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{patient_id}/medications", response_model=MedOut)
-def add_medication(patient_id: int, data: MedIn, db: Session = Depends(get_db)):
+def add_medication(
+    patient_id: int,
+    data: MedIn,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
@@ -82,7 +92,13 @@ def add_medication(patient_id: int, data: MedIn, db: Session = Depends(get_db)):
 
 
 @router.put("/{patient_id}/medications/{med_id}", response_model=MedOut)
-def update_medication(patient_id: int, med_id: int, data: MedUpdate, db: Session = Depends(get_db)):
+def update_medication(
+    patient_id: int,
+    med_id: int,
+    data: MedUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     med = db.query(models.Medication).filter(
         models.Medication.id == med_id,
         models.Medication.patient_id == patient_id,
@@ -97,7 +113,13 @@ def update_medication(patient_id: int, med_id: int, data: MedUpdate, db: Session
 
 
 @router.put("/{patient_id}/medications/{med_id}/discontinue", response_model=MedOut)
-def discontinue_medication(patient_id: int, med_id: int, data: DiscontinueIn, db: Session = Depends(get_db)):
+def discontinue_medication(
+    patient_id: int,
+    med_id: int,
+    data: DiscontinueIn,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     med = db.query(models.Medication).filter(
         models.Medication.id == med_id,
         models.Medication.patient_id == patient_id,
@@ -116,7 +138,12 @@ def discontinue_medication(patient_id: int, med_id: int, data: DiscontinueIn, db
 
 
 @router.put("/{patient_id}/medications/{med_id}/reactivate", response_model=MedOut)
-def reactivate_medication(patient_id: int, med_id: int, db: Session = Depends(get_db)):
+def reactivate_medication(
+    patient_id: int,
+    med_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     med = db.query(models.Medication).filter(
         models.Medication.id == med_id,
         models.Medication.patient_id == patient_id,
@@ -132,7 +159,12 @@ def reactivate_medication(patient_id: int, med_id: int, db: Session = Depends(ge
 
 
 @router.delete("/{patient_id}/medications/{med_id}")
-def delete_medication(patient_id: int, med_id: int, db: Session = Depends(get_db)):
+def delete_medication(
+    patient_id: int,
+    med_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     med = db.query(models.Medication).filter(
         models.Medication.id == med_id,
         models.Medication.patient_id == patient_id,

@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 import models, schemas
 from database import get_db
+from routers.auth import get_current_user, get_user_from_token, oauth2_scheme
 import os
 from fastapi.responses import FileResponse
 from fpdf import FPDF
@@ -430,26 +431,64 @@ def build_clinical_pdf(note, patient, vitals, db) -> str:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 @router.get("/", response_model=List[schemas.Note])
-def get_notes(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return db.query(models.Note).offset(skip).limit(limit).all()
+def get_notes(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    return (
+        db.query(models.Note)
+        .filter(models.Note.clinician_id == current_user.id)
+        .order_by(models.Note.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 
 @router.get("/patient/{patient_id}", response_model=List[schemas.Note])
-def get_patient_notes(patient_id: int, db: Session = Depends(get_db)):
-    return db.query(models.Note).filter(models.Note.patient_id == patient_id).all()
+def get_patient_notes(
+    patient_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    return (
+        db.query(models.Note)
+        .filter(
+            models.Note.patient_id == patient_id,
+            models.Note.clinician_id == current_user.id,
+        )
+        .order_by(models.Note.created_at.desc())
+        .all()
+    )
 
 
 @router.get("/{note_id}", response_model=schemas.Note)
-def get_note(note_id: int, db: Session = Depends(get_db)):
-    note = db.query(models.Note).filter(models.Note.id == note_id).first()
+def get_note(
+    note_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    note = db.query(models.Note).filter(
+        models.Note.id == note_id,
+        models.Note.clinician_id == current_user.id,
+    ).first()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     return note
 
 
 @router.put("/{note_id}/approve", response_model=schemas.Note)
-def approve_note(note_id: int, db: Session = Depends(get_db)):
-    note = db.query(models.Note).filter(models.Note.id == note_id).first()
+def approve_note(
+    note_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    note = db.query(models.Note).filter(
+        models.Note.id == note_id,
+        models.Note.clinician_id == current_user.id,
+    ).first()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     note.status = "approved"
@@ -459,8 +498,16 @@ def approve_note(note_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{note_id}", response_model=schemas.Note)
-def update_note(note_id: int, update_data: dict, db: Session = Depends(get_db)):
-    note = db.query(models.Note).filter(models.Note.id == note_id).first()
+def update_note(
+    note_id: int,
+    update_data: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    note = db.query(models.Note).filter(
+        models.Note.id == note_id,
+        models.Note.clinician_id == current_user.id,
+    ).first()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     if "content" in update_data:
@@ -471,8 +518,17 @@ def update_note(note_id: int, update_data: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/{note_id}/pdf")
-def export_pdf(note_id: int, db: Session = Depends(get_db)):
-    note = db.query(models.Note).filter(models.Note.id == note_id).first()
+def export_pdf(
+    note_id: int,
+    token: str | None = None,
+    bearer_token: str | None = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    current_user = get_user_from_token(token or bearer_token, db)
+    note = db.query(models.Note).filter(
+        models.Note.id == note_id,
+        models.Note.clinician_id == current_user.id,
+    ).first()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 

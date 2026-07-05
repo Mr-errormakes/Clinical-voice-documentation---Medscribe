@@ -6,34 +6,44 @@ import shutil
 import os
 import io
 import json
+import re
+import uuid
 import PyPDF2
 import av
 import models, schemas
 from database import get_db
+from routers.auth import get_current_user
 from sarvamai import AsyncSarvamAI
 from groq import AsyncGroq
 
-# --- Optional OCR support (requires Tesseract binary installed on system) ---
+# --- Mandatory OCR support (requires Tesseract binary installed on system) ---
 try:
     import pytesseract
     import fitz  # PyMuPDF
     from PIL import Image
+except Exception as e:
+    raise RuntimeError(
+        "OCR dependencies are required. Install pytesseract, PyMuPDF, and Pillow."
+    ) from e
 
-    _TESSERACT_PATHS = [
-        r"D:\learn\tesseract\tesseract.exe",
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-    ]
-    for _path in _TESSERACT_PATHS:
-        if os.path.exists(_path):
-            pytesseract.pytesseract.tesseract_cmd = _path
-            break
+_TESSERACT_PATHS = [
+    os.getenv("TESSERACT_CMD", ""),
+    r"D:\learn\tesseract\tesseract.exe",
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+]
+for _path in _TESSERACT_PATHS:
+    if _path and os.path.exists(_path):
+        pytesseract.pytesseract.tesseract_cmd = _path
+        break
 
+try:
     pytesseract.get_tesseract_version()
-    TESSERACT_AVAILABLE = True
-    print("Tesseract OCR available — scanned PDFs supported")
-except Exception:
-    TESSERACT_AVAILABLE = False
+    print("Tesseract OCR available - PDF and image report OCR enabled")
+except Exception as e:
+    raise RuntimeError(
+        "Tesseract OCR is required but was not found. Install Tesseract or set TESSERACT_CMD."
+    ) from e
 
 router = APIRouter(
     prefix="/api/consultations",
@@ -45,9 +55,25 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 GROQ_LLM_MODEL   = "llama-3.3-70b-versatile"
 GROQ_STT_MODEL   = "whisper-large-v3"
+ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".mp4", ".webm", ".ogg", ".opus", ".m4a", ".aac", ".flac", ".amr"}
+ALLOWED_REPORT_EXTS = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_REPORT_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 # Formats PyAV needs to convert to WAV before sending to APIs
 _NEEDS_CONVERSION = {".webm", ".ogg", ".opus", ".m4a", ".aac", ".flac"}
+
+
+def _safe_upload_path(prefix: str, consultation_id: int, filename: str, allowed_exts: set[str]) -> str:
+    original_name = os.path.basename(filename or "upload")
+    stem, ext = os.path.splitext(original_name)
+    ext = ext.lower()
+    if ext not in allowed_exts:
+        allowed = ", ".join(sorted(allowed_exts))
+        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {allowed}")
+
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._") or "file"
+    stored_name = f"{prefix}_{consultation_id}_{uuid.uuid4().hex}_{safe_stem}{ext}"
+    return os.path.join(UPLOAD_DIR, stored_name)
 
 
 def get_groq_client() -> AsyncGroq | None:
@@ -109,10 +135,9 @@ def get_sarvam_codec(file_path: str) -> str:
 
 
 def extract_pdf_text(file_path: str) -> str:
-    """Extract text from a PDF: PyMuPDF → PyPDF2 → Tesseract OCR."""
+    """Extract text from a PDF: PyMuPDF -> PyPDF2 -> Tesseract OCR."""
     text = ""
     try:
-        import fitz
         doc = fitz.open(file_path)
         for page in doc:
             text += page.get_text() + "\n"
@@ -128,9 +153,8 @@ def extract_pdf_text(file_path: str) -> str:
         except Exception as e:
             print(f"PyPDF2 failed for {file_path}: {e}")
 
-    if not text.strip() and TESSERACT_AVAILABLE:
+    if not text.strip():
         try:
-            import fitz
             doc = fitz.open(file_path)
             for page in doc:
                 mat = fitz.Matrix(2.0, 2.0)
@@ -143,6 +167,28 @@ def extract_pdf_text(file_path: str) -> str:
             print(f"Tesseract OCR failed for {file_path}: {e}")
 
     return text.strip()
+
+
+def extract_image_text(file_path: str) -> str:
+    """Extract text from image reports using mandatory Tesseract OCR."""
+    try:
+        with Image.open(file_path) as img:
+            text = pytesseract.image_to_string(img, lang="eng")
+        if text.strip():
+            print(f"Tesseract OCR extracted {len(text)} chars from image {file_path}")
+        return text.strip()
+    except Exception as e:
+        print(f"Tesseract image OCR failed for {file_path}: {e}")
+        return ""
+
+
+def extract_report_text(file_path: str) -> str:
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".pdf":
+        return extract_pdf_text(file_path)
+    if ext in IMAGE_REPORT_EXTS:
+        return extract_image_text(file_path)
+    return ""
 
 
 async def extract_vitals_from_text(text: str, groq_client: AsyncGroq) -> dict:
@@ -377,12 +423,38 @@ async def transcribe_audio(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 @router.post("/", response_model=schemas.Consultation)
-def create_consultation(consultation: schemas.ConsultationCreate, db: Session = Depends(get_db)):
-    new_consultation = models.Consultation(**consultation.dict(), clinician_id=1)
+def create_consultation(
+    consultation: schemas.ConsultationCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    patient = db.query(models.Patient).filter(models.Patient.id == consultation.patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    new_consultation = models.Consultation(
+        **consultation.dict(),
+        clinician_id=current_user.id,
+    )
     db.add(new_consultation)
     db.commit()
     db.refresh(new_consultation)
     return new_consultation
+
+
+@router.get("/{consultation_id}", response_model=schemas.ConsultationWithAttachments)
+def get_consultation(
+    consultation_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    consultation = db.query(models.Consultation).filter(
+        models.Consultation.id == consultation_id,
+        models.Consultation.clinician_id == current_user.id,
+    ).first()
+    if not consultation:
+        raise HTTPException(status_code=404, detail="Consultation not found")
+    return consultation
 
 
 @router.post("/{consultation_id}/upload-audio")
@@ -390,12 +462,16 @@ async def upload_audio(
     consultation_id: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
-    consultation = db.query(models.Consultation).filter(models.Consultation.id == consultation_id).first()
+    consultation = db.query(models.Consultation).filter(
+        models.Consultation.id == consultation_id,
+        models.Consultation.clinician_id == current_user.id,
+    ).first()
     if not consultation:
         raise HTTPException(status_code=404, detail="Consultation not found")
 
-    file_path = os.path.join(UPLOAD_DIR, f"audio_{consultation_id}_{file.filename}")
+    file_path = _safe_upload_path("audio", consultation_id, file.filename, ALLOWED_AUDIO_EXTS)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
@@ -411,14 +487,20 @@ async def upload_reports(
     files: List[UploadFile] = File(...),
     report_type: str = Form("new"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
-    consultation = db.query(models.Consultation).filter(models.Consultation.id == consultation_id).first()
+    consultation = db.query(models.Consultation).filter(
+        models.Consultation.id == consultation_id,
+        models.Consultation.clinician_id == current_user.id,
+    ).first()
     if not consultation:
         raise HTTPException(status_code=404, detail="Consultation not found")
+    if report_type not in {"old", "new"}:
+        raise HTTPException(status_code=400, detail="report_type must be 'old' or 'new'")
 
     saved_files = []
     for file in files:
-        file_path = os.path.join(UPLOAD_DIR, f"report_{consultation_id}_{file.filename}")
+        file_path = _safe_upload_path("report", consultation_id, file.filename, ALLOWED_REPORT_EXTS)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         attachment = models.Attachment(
@@ -438,10 +520,16 @@ async def process_consultation(
     consultation_id: int,
     template: str = "soap",
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
-    consultation = db.query(models.Consultation).filter(models.Consultation.id == consultation_id).first()
+    consultation = db.query(models.Consultation).filter(
+        models.Consultation.id == consultation_id,
+        models.Consultation.clinician_id == current_user.id,
+    ).first()
     if not consultation:
         raise HTTPException(status_code=404, detail="Consultation not found")
+    if template not in {"soap", "hospital_opd", "abdm"}:
+        raise HTTPException(status_code=400, detail="Unsupported note template")
 
     consultation.status = "processing"
     db.commit()
@@ -452,15 +540,15 @@ async def process_consultation(
     note_content       = {}
     api_success        = False
 
-    # --- Extract text from uploaded PDF reports ---
+    # --- Extract text from uploaded reports ---
     report_attachments = db.query(models.Attachment).filter(
         models.Attachment.consultation_id == consultation_id,
         models.Attachment.type.like("report_%"),
     ).all()
 
     for att in report_attachments:
-        if att.file_path.endswith(".pdf") and os.path.exists(att.file_path):
-            text = extract_pdf_text(att.file_path)
+        if os.path.exists(att.file_path):
+            text = extract_report_text(att.file_path)
             if att.type == "report_old":
                 extracted_old_text += text + "\n"
             else:
@@ -478,8 +566,8 @@ async def process_consultation(
                 models.Attachment.consultation_id == pc.id,
                 models.Attachment.type.like("report_%"),
             ).all():
-                if att.file_path.endswith(".pdf") and os.path.exists(att.file_path):
-                    extracted_old_text += extract_pdf_text(att.file_path) + "\n"
+                if os.path.exists(att.file_path):
+                    extracted_old_text += extract_report_text(att.file_path) + "\n"
             if extracted_old_text:
                 break
 

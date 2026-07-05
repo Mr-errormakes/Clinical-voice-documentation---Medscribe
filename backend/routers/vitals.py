@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from datetime import datetime
 import models
 from database import get_db
+from routers.auth import get_current_user
 
 router = APIRouter(prefix="/api/patients", tags=["Vitals"])
 
@@ -44,7 +45,11 @@ class VitalOut(BaseModel):
 
 
 @router.get("/{patient_id}/vitals")
-def list_vitals(patient_id: int, db: Session = Depends(get_db)):
+def list_vitals(
+    patient_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
@@ -58,7 +63,12 @@ def list_vitals(patient_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{patient_id}/vitals", response_model=VitalOut)
-def add_vital(patient_id: int, data: VitalIn, db: Session = Depends(get_db)):
+def add_vital(
+    patient_id: int,
+    data: VitalIn,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
@@ -70,7 +80,12 @@ def add_vital(patient_id: int, data: VitalIn, db: Session = Depends(get_db)):
 
 
 @router.delete("/{patient_id}/vitals/{vital_id}")
-def delete_vital(patient_id: int, vital_id: int, db: Session = Depends(get_db)):
+def delete_vital(
+    patient_id: int,
+    vital_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     reading = db.query(models.VitalReading).filter(
         models.VitalReading.id == vital_id,
         models.VitalReading.patient_id == patient_id,
